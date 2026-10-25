@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Security;
 using System.Windows.Forms;
@@ -14,6 +15,7 @@ using mRemoteNG.Container;
 using mRemoteNG.Messages;
 using mRemoteNG.Plugins;
 using mRemoteNG.Security;
+using mRemoteNG.Security.KeyDerivation;
 using mRemoteNG.Tools;
 using mRemoteNG.Tree;
 using mRemoteNG.Tree.Root;
@@ -31,8 +33,12 @@ namespace mRemoteNG.Config.Serializers.ConnectionSerializers.Xml
         private double _confVersion;
         private XmlConnectionsDecryptor _decryptor;
         private readonly string ConnectionFileName = "";
-        private const double MaxSupportedConfVersion = 2.8;
+        // Must match the newest version written by XmlConnectionSerializerFactory,
+        // otherwise the app refuses to open files it saved itself
+        internal const double MaxSupportedConfVersion = 2.9;
         private readonly RootNodeInfo _rootNodeInfo = new(RootNodeType.Connection);
+        // Ids handed out while reading the current file, to keep each one unique.
+        private readonly HashSet<string> _connectionIds = new(StringComparer.Ordinal);
 
         public Func<Optional<SecureString>>? AuthenticationRequestor { get; set; } = authenticationRequestor;
 
@@ -46,6 +52,7 @@ namespace mRemoteNG.Config.Serializers.ConnectionSerializers.Xml
             if (string.IsNullOrEmpty(xml)) return null;
             try
             {
+                _connectionIds.Clear();
                 LoadXmlConnectionData(xml);
                 ValidateConnectionFileVersion();
 
@@ -131,11 +138,14 @@ namespace mRemoteNG.Config.Serializers.ConnectionSerializers.Xml
                 BlockCipherEngines engine = connectionsRootElement.GetAttributeAsEnum<BlockCipherEngines>("EncryptionEngine");
                 BlockCipherModes mode = connectionsRootElement.GetAttributeAsEnum<BlockCipherModes>("BlockCipherMode");
                 int keyDerivationIterations = connectionsRootElement.GetAttributeAsInt("KdfIterations");
+                // Files saved before this attribute existed used the legacy derivation
+                KeyDerivationAlgorithms keyDerivationAlgorithm = connectionsRootElement.GetAttributeAsEnum("KdfAlgorithm", KeyDerivationAlgorithms.Pbkdf2Sha1Legacy);
 
                 _decryptor = new XmlConnectionsDecryptor(engine, mode, rootNodeInfo)
                 {
                     AuthenticationRequestor = AuthenticationRequestor,
-                    KeyDerivationIterations = keyDerivationIterations
+                    KeyDerivationIterations = keyDerivationIterations,
+                    KeyDerivationAlgorithm = keyDerivationAlgorithm
                 };
             }
             else
@@ -193,8 +203,12 @@ namespace mRemoteNG.Config.Serializers.ConnectionSerializers.Xml
                 return null;
 
             string connectionId = xmlnode.GetAttributeAsString("Id");
-            if (string.IsNullOrWhiteSpace(connectionId))
+            // A file can carry the same Id on two nodes, typically a copy that kept the original's
+            // Id. Everything that looks a connection up by its Id would then only ever reach one of
+            // them, so the later node gets a fresh Id, which the next save writes back.
+            if (string.IsNullOrWhiteSpace(connectionId) || _connectionIds.Contains(connectionId))
                 connectionId = Guid.NewGuid().ToString();
+            _connectionIds.Add(connectionId);
             ConnectionInfo connectionInfo = new(connectionId);
 
             try
